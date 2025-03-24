@@ -1,5 +1,11 @@
 # Disposable AsyncContext.Variable
 
+Champions:
+
+- Chengzhong Wu ([@legendecas](https://github.com/legendecas))
+- Luca Casonato ([@lucacasonato](https://github.com/lucacasonato))
+- snek ([@devsnek](https://github.com/devsnek))
+
 # Motivation
 
 [AsyncContext][] enforces mutation with `AsyncContext.Variable` by a function scope API
