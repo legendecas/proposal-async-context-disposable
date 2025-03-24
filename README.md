@@ -244,15 +244,15 @@ async function doWork() {
   using parent = tracer.startActiveSpan("parent");
   // do some work that 'parent' tracks
   console.log("doing some work...");
-  const anotherWorkPromise = doAnotherWork();
+  await doSomeWork();
   // Create a nested span to track nested work
   {
     using child = tracer.startActiveSpan("child");
     // do some work that 'child' tracks
-    console.log("doing some nested work...")
+    console.log("doing some nested child work...")
     // the nested span is closed when it's out of scope
   }
-  await anotherWorkPromise;
+  await doAnotherWork();
   // This parent span is also closed when it goes out of scope
 }
 ```
@@ -287,14 +287,16 @@ class Tracer {
 ```
 
 The semantic that doesn't mutate existing AsyncContext mapping is crucial to the
-`startAsCurrentSpan` example here, as it allows deferred span created in
-`doAnotherWork` to be a child span of the `"parent"` instead of `"child"`,
-shown as graph below:
+`startAsCurrentSpan` example here, as it allows `doAnotherWork` to be a child
+span of the `"parent"` instead of `"child"`, shown as graph below:
 
 ```
 ⌌----------⌍
 | 'parent' |
 ⌎----------⌏
+  |   ⌌-----------------⌍
+  |---| 'doSomeWork'    |
+  |   ⌎-----------------⌏
   |   ⌌---------⌍
   |---| 'child' |
   |   ⌎---------⌏
