@@ -1,50 +1,303 @@
-# template-for-proposals
+# Disposable AsyncContext.Variable
 
-A repository template for ECMAScript proposals.
+# Motivation
 
-## Before creating a proposal
+[AsyncContext][] enforces mutation with `AsyncContext.Variable` by a function scope API
+`AsyncContext.Variable.prototype.run`. This requires any `Variable` value mutations to
+be performed within a new function scope.
 
-Please ensure the following:
-  1. You have read the [process document](https://tc39.github.io/process-document/)
-  1. You have reviewed the [existing proposals](https://github.com/tc39/proposals/)
-  1. You are aware that your proposal requires being a member of TC39, or locating a TC39 delegate to “champion” your proposal
+Modifications to `Variable` values are propagated to its subtasks. This `.run`
+scope enforcement prevents any modifications to be visible to its caller
+function scope, consequently been propagated to tasks created in sibling
+function calls.
 
-## Create your proposal repo
+For instance, this prevents a mutation in an event listener be accidentally
+leaked out to its dispatcher:
 
-Follow these steps:
-  1. Click the green [“use this template”](https://github.com/tc39/template-for-proposals/generate) button in the repo header. (Note: Do not fork this repo in GitHub's web interface, as that will later prevent transfer into the TC39 organization)
-  1. Update ecmarkup and the biblio to the latest version: `npm install --save-dev ecmarkup@latest && npm install --save-dev --save-exact @tc39/ecma262-biblio@latest`.
-  1. Go to your repo settings page:
-      1. Under “General”, under “Features”, ensure “Issues” is checked, and disable “Wiki”, and “Projects” (unless you intend to use Projects)
-      1. Under “Pull Requests”, check “Always suggest updating pull request branches” and “automatically delete head branches”
-      1. Under the “Pages” section on the left sidebar, and set the source to “deploy from a branch”, select “gh-pages” in the branch dropdown, and then ensure that “Enforce HTTPS” is checked.
-      1. Under the “Actions” section on the left sidebar, under “General”, select “Read and write permissions” under “Workflow permissions” and click “Save”
-  1. [“How to write a good explainer”][explainer] explains how to make a good first impression.
+```js
+const asyncVar = new AsyncContext.Variable();
+eventTarget.addEventListener('click', function firstListener() {
+  asyncVar.run('first', () => {
+    //...
+  });
+  // 'first' is not visible outside of firstListener
+});
 
-      > Each TC39 proposal should have a `README.md` file which explains the purpose
-      > of the proposal and its shape at a high level.
-      >
-      > ...
-      >
-      > The rest of this page can be used as a template ...
+eventTarget.addEventListener('click', function secondListener() {
+  asyncVar.run('second', () => {
+    //...
+  });
+});
 
-      Your explainer can point readers to the `index.html` generated from `spec.emu`
-      via markdown like
+eventTarget.dispatch(new Event('click'));
+// 'first' is not visible to the secondListener.
+```
 
-      ```markdown
-      You can browse the [ecmarkup output](https://ACCOUNT.github.io/PROJECT/)
-      or browse the [source](https://github.com/ACCOUNT/PROJECT/blob/HEAD/spec.emu).
-      ```
+## Usages of run
 
-      where *ACCOUNT* and *PROJECT* are the first two path elements in your project's Github URL.
-      For example, for github.com/**tc39**/**template-for-proposals**, *ACCOUNT* is “tc39”
-      and *PROJECT* is “template-for-proposals”.
+The `run` pattern can already handles many existing usage pattern well that
+involves function calls, like:
 
+- Event handlers,
+- Middleware.
 
-## Maintain your proposal repo
+For example, an event handler can be easily refactored to use `.run(value, fn)`
+by wrapping:
 
-  1. Make your changes to `spec.emu` (ecmarkup uses HTML syntax, but is not HTML, so I strongly suggest not naming it “.html”)
-  1. Any commit that makes meaningful changes to the spec, should run `npm run build` to verify that the build will succeed and the output looks as expected.
-  1. Whenever you update `ecmarkup`, run `npm run build` to verify that the build will succeed and the output looks as expected.
+```js
+function handler(event) {
+  ...
+}
 
-  [explainer]: https://github.com/tc39/how-we-work/blob/HEAD/explainer.md
+button.addEventListener("click", handler);
+// ... replace it with ...
+button.addEventListener("click", event => {
+  asyncVar.run(createSpan(), handler, event);
+});
+```
+
+Or, on Node.js server applications, where middlewares are common to use:
+
+```js
+const middlewares = [];
+function use(fn) {
+  middlewares.push(fn)
+}
+
+async function runMiddlewares(req, res) {
+  function next(i) {
+    if (i === middlewares.length) {
+      return;
+    }
+    return middlewares[i](req, res, next.bind(i++));
+  }
+
+  return next(0);
+}
+```
+
+A tracing library like OpenTelemetry can instrument it with a middleware
+wrapper like:
+
+```js
+async function otelMiddleware(req, res, next) {
+  const w3cTraceContext = extractW3CHeaders(req);
+  const span = createSpan(w3cTraceContext);
+  try {
+    await asyncVar.run(span, next);
+  } catch (e) {
+    span.setError(e);
+  } finally {
+    span.end();
+  }
+}
+```
+
+### Limitation of run
+
+The enforcement of mutation scopes can reduce the chance that the mutation is
+exposed to the parent scope in unexpected way, but it also increases the bar to
+use the feature or migrate existing code to adopt the feature.
+
+For example, given a snippet of code:
+
+```js
+function *gen() {
+  yield computeResult();
+  yield computeResult2();
+}
+```
+
+If we want to scope the `computeResult` and `computeResult2` calls with a new
+AsyncContext value, it needs non-trivial refactor:
+
+```js
+const asyncVar = new AsyncContext.Context();
+
+function *gen() {
+  const span = createSpan();
+  yield asyncVar.run(span, () => computeResult());
+  yield asyncVar.run(span, () => computeResult2());
+  // ...or
+  yield* asyncVar.run(span, function *() {
+    yield computeResult();
+    yield computeResult2();
+  });
+}
+```
+
+`.run(val, fn)` creates a new function body. The new function environment
+is not equivalent to the outer environment and can not trivially share code
+fragments between them. Additionally, `break`/`continue`/`return` can not be
+refactored naively.
+
+It will be more intuitive to be able to insert a new line and without refactor
+existing code snippet.
+
+```diff
+ const asyncVar = new AsyncContext.Variable();
+
+ function *gen() {
++  using _ = asyncVar.withValue(createSpan(i));
+   yield computeResult(i);
+   yield computeResult2(i);
+ }
+```
+
+# The proposal
+
+To address the limitation of `.run`, but still with the advantage of enforced
+scope of mutation, `AsyncContext.Variable` can implement the well-known symbol
+interface [`@@dispose`][] by the `using` declaration (and potentially enforcing
+the `using` declaration with [`@@enter`][]).
+
+> `AsyncContext.Snapshot` is intentionally excluded from this feature, as it
+> affects the AsyncContext mappings including other `AsyncContext.Variable` instances.
+
+```js
+const asyncVar = new AsyncContext.Variable();
+
+{
+  using _ = asyncVar.withValue("main");
+  new AsyncContext.Snapshot() // snapshot 0
+  console.log(asyncVar.get()); // => "main"
+}
+
+{
+  using _ = asyncVar.withValue("value-1");
+  new AsyncContext.Snapshot() // snapshot 1
+  Promise.resolve()
+    .then(() => { // continuation 1
+      console.log(asyncVar.get()); // => 'value-1'
+    })
+}
+
+{
+  using _ = asyncVar.withValue("value-2");
+  new AsyncContext.Snapshot() // snapshot 2
+  Promise.resolve()
+    .then(() => { // continuation 2
+      console.log(asyncVar.get()); // => 'value-2'
+    })
+}
+```
+
+Notably, the `withValue` does not mutate the AsyncContext mapping in place, just
+like `.run` does. It creates a new mapping for the subsequent scope. The value
+mapping is equivalent to:
+
+```
+⌌-----------⌍ snapshot 0
+|   'main'  |
+⌎-----------⌏
+      |
+⌌-----------⌍ snapshot 1
+| 'value-1' |  <---- the continuation 1
+⌎-----------⌏
+      |
+⌌-----------⌍ snapshot 2
+| 'value-2' |  <---- the continuation 2
+⌎-----------⌏
+```
+
+Each `@@enter` operation creates an AsyncContext mapping with the new value, avoids
+any mutation to existing AsyncContext mapping where the current
+`AsyncContext.Variable` value was captured.
+
+This trait is important with both `run` and `withValue` because mutations to an
+`AsyncContext.Variable` must not mutate prior `AsyncContext.Snapshot`s.
+
+However, the well-known symbol `@@dispose` and `@@enter` is not bound to the
+`using` declaration syntax, and they can be invoked manually. This is a
+by-design feature allowing advanced user-land extension, like OpenTelemetry's
+example in the next section.
+
+This is an extension to the proposed `run` semantics.
+
+## Use cases
+
+### Web frameworks
+
+> TODO: Let's refer to web frameworks for examples.
+
+### Tracing
+
+The set semantic allows instrumenting existing codes without nesting them in a
+new function scope and reducing the refactoring work:
+
+```js
+async function doAnotherWork() {
+  // defer work to next promise tick.
+  await 0;
+  using span = tracer.startActiveSpan("anotherWork");
+  console.log("doing another work");
+  // the span is closed when it's out of scope
+}
+
+async function doWork() {
+  using parent = tracer.startActiveSpan("parent");
+  // do some work that 'parent' tracks
+  console.log("doing some work...");
+  const anotherWorkPromise = doAnotherWork();
+  // Create a nested span to track nested work
+  {
+    using child = tracer.startActiveSpan("child");
+    // do some work that 'child' tracks
+    console.log("doing some nested work...")
+    // the nested span is closed when it's out of scope
+  }
+  await anotherWorkPromise;
+  // This parent span is also closed when it goes out of scope
+}
+```
+
+> This example is adapted from the OpenTelemetry Python example.
+> https://opentelemetry.io/docs/languages/python/instrumentation/#creating-spans
+
+Each `tracer.startActiveSpan` invocation retrieves the parent span from its
+own `AsyncContext.Variable` instance and create span as a child, and set the
+child span as the current value of the `AsyncContext.Variable` instance:
+
+```js
+class Tracer {
+  #var = new AsyncContext.Variable();
+
+  startActiveSpan(name) {
+    let scope;
+    const span = {
+      name,
+      parent: this.#var.get(),
+      [Symbol.enter]: () => {
+        scope = this.#var.withValue(span)[Symbol.enter]();
+        return span;
+      },
+      [Symbol.dispose]: () => {
+        scope[Symbol.dispose]();
+      },
+    };
+    return span;
+  }
+}
+```
+
+The semantic that doesn't mutate existing AsyncContext mapping is crucial to the
+`startAsCurrentSpan` example here, as it allows deferred span created in
+`doAnotherWork` to be a child span of the `"parent"` instead of `"child"`,
+shown as graph below:
+
+```
+⌌----------⌍
+| 'parent' |
+⌎----------⌏
+  |   ⌌---------⌍
+  |---| 'child' |
+  |   ⌎---------⌏
+  |   ⌌-----------------⌍
+  |---| 'doAnotherWork' |
+  |   ⌎-----------------⌏
+```
+
+[`@@dispose`]: https://github.com/tc39/proposal-explicit-resource-management?tab=readme-ov-file#using-declarations
+[`@@enter`]: https://github.com/tc39/proposal-using-enforcement?tab=readme-ov-file#proposed-solution
+[`ContinuationVariable`]: ./CONTINUATION.md
+[AsyncContext]: https://github.com/tc39/proposal-async-context
