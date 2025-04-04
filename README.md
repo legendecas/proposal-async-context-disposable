@@ -354,7 +354,54 @@ a scope out of sync with the lexical scoping, an alternative proposal is to
 specialize the handling of async context variables in `using` declarations as
 follows:
 
-// TODO: snek
+```js
+class AsyncVariableScope {
+  #asyncVar;
+  #value;
+  #previousContextMapping;
+
+  constructor(asyncVar, value) {
+    this.#asyncVar = asyncVar;
+    this.#value = value;
+  }
+
+  // if present, slot called by `using` instead of @@enter
+  [[UsingEnter]]() {
+    const asyncContextMapping = snapshot + { [[AsyncContextKey]]: this.[[AsyncVariable]], [[AsyncContextValue]]: this.[[Value]] };
+    this.#previousContextMapping = AsyncContextSwap(asyncContextMapping);
+  }
+
+  // if present, slot called by `using` instead of @@dispose
+  [[UsingDispose]]() {
+    AsyncContextSwap(this.#previousContextMapping);
+  }
+}
+```
+
+This can then be used in user code with subclassing:
+
+```js
+class SpanRef extends AsyncVariableScopable {
+  #span;
+
+  constructor(tracer, span) {
+    super(tracer.asyncContext, span);
+    this.#span = span;
+  }
+
+  // span apis here, etc...
+  setAttribute(name, value) { this.#span.setAttribute(name, value); }
+}
+
+class Tracer {
+  startSpan() {
+    const span = this.createSpan();
+    return new SpanRef(this, span);
+  }
+}
+
+using span = tracer.startSpan();
+```
 
 # Use cases
 
