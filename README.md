@@ -8,9 +8,9 @@ Champions:
 
 # Motivation
 
-[AsyncContext][] enforces mutation with `AsyncContext.Variable` by a function scope API
-`AsyncContext.Variable.prototype.run`. This requires any `Variable` value mutations to
-be performed within a new function scope.
+[AsyncContext][AsyncContext] enforces mutation with `AsyncContext.Variable` by a
+function scope API `AsyncContext.Variable.prototype.run`. This requires any
+`Variable` value mutations to be performed within a new function scope.
 
 Modifications to `Variable` values are propagated to its subtasks. This `.run`
 scope enforcement prevents any modifications to be visible to its caller
@@ -22,30 +22,30 @@ leaked out to its dispatcher:
 
 ```js
 const asyncVar = new AsyncContext.Variable();
-eventTarget.addEventListener('click', function firstListener() {
-  asyncVar.run('first', () => {
+eventTarget.addEventListener("click", function firstListener() {
+  asyncVar.run("first", () => {
     //...
   });
   // 'first' is not visible outside of firstListener
 });
 
-eventTarget.addEventListener('click', function secondListener() {
-  asyncVar.run('second', () => {
+eventTarget.addEventListener("click", function secondListener() {
+  asyncVar.run("second", () => {
     //...
   });
 });
 
-eventTarget.dispatch(new Event('click'));
+eventTarget.dispatch(new Event("click"));
 // 'first' is not visible to the secondListener.
 ```
 
-## Usages of run
+## Usages of `run`
 
-The `run` pattern can already handles many existing usage pattern well that
-involves function calls, like:
+The `run` pattern can already handle many existing usage patterns well that
+involve function calls, like:
 
 - Event handlers,
-- Middleware.
+- or Middleware.
 
 For example, an event handler can be easily refactored to use `.run(value, fn)`
 by wrapping:
@@ -67,7 +67,7 @@ Or, on Node.js server applications, where middlewares are common to use:
 ```js
 const middlewares = [];
 function use(fn) {
-  middlewares.push(fn)
+  middlewares.push(fn);
 }
 
 async function runMiddlewares(req, res) {
@@ -82,8 +82,8 @@ async function runMiddlewares(req, res) {
 }
 ```
 
-A tracing library like OpenTelemetry can instrument it with a middleware
-wrapper like:
+A tracing library like OpenTelemetry can instrument it with a middleware wrapper
+like:
 
 ```js
 async function otelMiddleware(req, res, next) {
@@ -99,7 +99,7 @@ async function otelMiddleware(req, res, next) {
 }
 ```
 
-### Limitation of run
+### Limitations of `run`
 
 The enforcement of mutation scopes can reduce the chance that the mutation is
 exposed to the parent scope in unexpected way, but it also increases the bar to
@@ -108,7 +108,7 @@ use the feature or migrate existing code to adopt the feature.
 For example, given a snippet of code:
 
 ```js
-function *gen() {
+function* gen() {
   yield computeResult();
   yield computeResult2();
 }
@@ -120,25 +120,26 @@ AsyncContext value, it needs non-trivial refactor:
 ```js
 const asyncVar = new AsyncContext.Context();
 
-function *gen() {
+function* gen() {
   const span = createSpan();
   yield asyncVar.run(span, () => computeResult());
   yield asyncVar.run(span, () => computeResult2());
   // ...or
-  yield* asyncVar.run(span, function *() {
+  yield* asyncVar.run(span, function* () {
     yield computeResult();
     yield computeResult2();
   });
 }
 ```
 
-`.run(val, fn)` creates a new function body. The new function environment
-is not equivalent to the outer environment and can not trivially share code
-fragments between them. Additionally, `break`/`continue`/`return` can not be
-refactored naively.
+`.run(val, fn)` creates a new function body. The new function environment is not
+equivalent to the outer environment and can not trivially share code fragments
+between them. Additionally, `break`/`continue`/`return` can not be refactored
+naively.
 
-It will be more intuitive to be able to insert a new line and without refactor
-existing code snippet.
+It would be more intuitive to be able to insert a single line of code to scope
+the `computeResult` and `computeResult2` calls with a new AsyncContext value
+without needing to refactor the existing code.
 
 ```diff
  const asyncVar = new AsyncContext.Variable();
@@ -150,41 +151,90 @@ existing code snippet.
  }
 ```
 
-# The proposal
+# Goal
 
-To address the limitation of `.run`, but still with the advantage of enforced
-scope of mutation, `AsyncContext.Variable` can implement the well-known symbol
-interface [`@@dispose`][] by the `using` declaration (and potentially enforcing
-the `using` declaration with [`@@enter`][]).
+We are looking for a way to bind a `Variable` value to a lexical scope, without
+having to create a new lexical scope in the form of a function.
+
+We are also looking to enable non-`Variable` objects that internally contain
+`AsyncContext.Variable` instances to still be able to use the same lexical
+binding for their internal `AsyncContext.Variable` instances, without exposing
+the `AsyncContext.Variable` instance to the user.
+
+We are not necessarily looking to create a general purpose `enter`/`exit` API
+for async context that could arbitrarily interleave variable scopes. We have
+heard from implementers that doing so would be very challenging to implement
+performantly (see [#3][issue-3]). After a review of many current ecosystem uses
+of `AsyncLocalStorage` in Node, we are relatively confident that the majority of
+use cases that have used `als.enterWith()` in Node can either switch to a
+`using` based API as proposed here, or the `AsyncContext.Variable#run()` API.
+
+> If you think you have use-cases that require an "unsafe" general purpose
+> `enter`/`exit` API, please file an issue to discuss. We are interested to
+> learn about them and see how we can accommodate these use-cases.
+
+# Proposals
+
+We have not settled on any solution, but are currently exploring the following
+three options:
+
+- Using `using` for lexical binding, by adding `@@dispose` and `@@enter` to
+  `AsyncContext.Variable`
+- Using `using` for lexical binding, enforcing the mutation to only exist in the
+  lexical scope that `using` is in, by automatically cleaning up after manually
+  entering in `Symbol.enter`
+- Using `using` for lexical binding, with a special sub-classable class that
+  integrates with `using` directly to automatically clean up
+
+Each of these options has its own trade-offs, but they all share the same
+semantics of mutating the `AsyncContext.Variable` value in a lexical scope. Some
+of these have side-effects that would allow manually entering and exiting a
+scope out of sync with lexical scoping. The options are discussed in more detail
+below.
+
+## Proposal A: manually callable `@@dispose` and `@@enter`
+
+`AsyncContext.Variable` would get a `withValue` method that returns an object
+that implements the well-known symbol interface [`@@dispose`][`@@dispose`] and
+[`@@enter`][`@@enter`]. This would allow the `using` declaration to be used to
+bind the value of the `AsyncContext.Variable` to a lexical scope. The
+`@@dispose` method would be called when the `using` declaration goes out of
+scope.
+
+The `@@enter` method would enter a new async context scope with the value of the
+`AsyncContext.Variable` set to the value passed to `withValue`. The `@@dispose`
+method would exit the async context scope and restore the previous value of the
+`AsyncContext.Variable`.
 
 > `AsyncContext.Snapshot` is intentionally excluded from this feature, as it
-> affects the AsyncContext mappings including other `AsyncContext.Variable` instances.
+> affects the AsyncContext mappings including other `AsyncContext.Variable`
+> instances.
 
 ```js
 const asyncVar = new AsyncContext.Variable();
 
 {
   using _ = asyncVar.withValue("main");
-  new AsyncContext.Snapshot() // snapshot 0
+  new AsyncContext.Snapshot(); // snapshot 0
   console.log(asyncVar.get()); // => "main"
 }
 
 {
   using _ = asyncVar.withValue("value-1");
-  new AsyncContext.Snapshot() // snapshot 1
+  new AsyncContext.Snapshot(); // snapshot 1
   Promise.resolve()
     .then(() => { // continuation 1
       console.log(asyncVar.get()); // => 'value-1'
-    })
+    });
 }
 
 {
   using _ = asyncVar.withValue("value-2");
-  new AsyncContext.Snapshot() // snapshot 2
+  new AsyncContext.Snapshot(); // snapshot 2
   Promise.resolve()
     .then(() => { // continuation 2
       console.log(asyncVar.get()); // => 'value-2'
-    })
+    });
 }
 ```
 
@@ -206,26 +256,213 @@ mapping is equivalent to:
 ⌎-----------⌏
 ```
 
-Each `@@enter` operation creates an AsyncContext mapping with the new value, avoids
-any mutation to existing AsyncContext mapping where the current
+Each `@@enter` operation creates an AsyncContext mapping with the new value,
+avoids any mutation to existing AsyncContext mapping where the current
 `AsyncContext.Variable` value was captured.
 
 This trait is important with both `run` and `withValue` because mutations to an
 `AsyncContext.Variable` must not mutate prior `AsyncContext.Snapshot`s.
 
-However, the well-known symbol `@@dispose` and `@@enter` is not bound to the
-`using` declaration syntax, and they can be invoked manually. This is a
-by-design feature allowing advanced user-land extension, like OpenTelemetry's
-example in the next section.
+This does have a downside though: the well-known symbol `@@dispose` and
+`@@enter` are not bound to the `using` declaration syntax, so they can be
+invoked manually. This can lead to a situation where a user could manually enter
+and exit a scope out of sync with the lexical scoping (see [#2][issue-2]).
+Unless mitigations for this are added, this could result in a feature that would
+not be implementable without performance overhead (see [#3][issue-3]).
 
-This is an extension to the proposed `run` semantics.
+Additional mitigations to ensure that the `@@dispose` and `@@enter` methods are
+not used with `DisposableStack` would have to be added, because
+`DisposableStack` does not enforce binding to a lexical scope.
 
-## Use cases
+## Proposal B: enforced disposal through automatic enter tracking
 
-### Tracing
+As a mitigation to the above issue of manually entering and exiting a scope out
+of sync with the lexical scoping, an alternative proposal is to specialize the
+handling of async context variables in `using` declarations as illustrated by
+this pseudo code:
 
-The set semantic allows instrumenting existing codes without nesting them in a
-new function scope and reducing the refactoring work:
+```js
+const GLOBAL_STACK = [];
+
+function UsingEnter(state, enterMethod) {
+  const current = CaptureSnapshot();
+  GLOBAL_STACK.push(current);
+  try {
+    enterMethod();
+  } finally {
+    const newSnapshot = GLOBAL_STACK.pop();
+    RestoreSnapshot(newSnapshot);
+    state.snapshot = current;
+  }
+}
+
+function UsingExit(state, disposeMethod) {
+  try {
+    disposeMethod();
+  } finally {
+    RestoreSnapshot(state.snapshot);
+  }
+}
+
+function AsyncVariableSymbolEnter(variable, value) {
+  const current = GLOBAL_STACK.pop();
+  if (current === undefined) {
+    throw new TypeError(
+      "Can not enter an async variable outside of `using`.",
+    );
+  }
+  const newSnapshot = AddToSnapshot(
+    current,
+    variable,
+    value,
+  );
+  GLOBAL_STACK.push(newSnapshot);
+}
+```
+
+- In the `using` machinery, before calling the `@@enter` method, capture the
+  current snapshot and push it into a global stack variable.
+- The `@@enter` method implementation would check if the global stack contains a
+  snapshot. If it does not, an error would be thrown. If it does, the `@@enter`
+  method would create a new snapshot from the top most snapshot in the stack by
+  adding the variable, and then set it back into the same slot in the stack.
+  This is later read from the `using` machinery.
+- In the `using` machinery, after the `@@enter` method returns, the snapshot is
+  removed from the global stack and entered. The original captured current
+  snapshot is saved.
+
+- In the `using` machinery, once the `using` declaration lexical scope closes,
+  as usual the `@@dispose` method is called. Once the `@@dispose` method
+  returns, the snapshot captured during enter is restored inside the `using`
+  machinery.
+
+This proposal does not enable manual entering and exiting of the async context
+scope, and it requires the `@@enter` method to be called from a `using`
+declaration. Binding to a lexical scope is enforced, just like with `run`.
+
+The proposal does add some additional complexity to the `using` machinery.
+
+> With this proposal, `Symbol.enter` on the `AsyncContext.Variable#withValue`
+> object would never directly enter a scope, but would instead schedule the
+> enter for when the `Symbol.enter` callback is invoked. This is necessary to
+> ensure that the scope with the entered value can not leak out.
+
+## Proposal C: enforced disposal through a specialized class
+
+As an alternative mitigation to the above issue of manually entering and exiting
+a scope out of sync with the lexical scoping, an alternative proposal is to
+specialize the handling of async context variables in `using` declarations as
+follows:
+
+// TODO: snek
+
+# Use cases
+
+## Tracing
+
+In tracing systems like OpenTelemetry, an `AsyncContext.Variable` is used to
+keep track of the currently active span. This is used to create child spans, and
+to manage context propagation without having to manually pass the span
+information around through the entire application and its dependencies.
+
+Because the `AsyncContext.Variable` is used to keep track of the currently
+active span, `.run` must be used to create a new async context scope for the
+active span. This is inconvenient as every time a new span is created, a new
+function scope must be created. This is especially inconvenient for spans inside
+of loops or generators, because `break`/`continue`/`return`/`yield` statements
+do not work anymore when wrapped in a new function scope.
+
+Currently, this means a lot of boilerplate code is needed to create spans and to
+manage the async context:
+
+<table>
+<thead>
+<tr>
+  <th>Without instrumentation</th>
+  <th>With instrumentation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+  <td>
+
+```js
+async function doAnotherWork() {
+  // defer work to next promise tick.
+  await 0;
+  console.log("doing another work");
+}
+
+async function* doGeneratedWork() {
+  console.log("doing some work...");
+  yield 1;
+  yield 2;
+  yield 3;
+}
+
+async function doWork() {
+  // do some work that 'parent' tracks
+  console.log("doing some work...");
+  await doAnotherWork();
+  console.log("doing some nested child work...");
+  // Call a generator function
+  for await (const work of doGeneratedWork()) {
+    console.log("did work ", work);
+  }
+}
+```
+
+</td>
+  <td>
+
+```js
+async function doAnotherWork() {
+  // defer work to next promise tick.
+  await 0;
+  const span = tracer.startSpan("anotherWork");
+  return span.run(async () => {
+    console.log("doing another work");
+    // the span is closed when it's out of scope
+  });
+}
+
+async function* doGeneratedWork() {
+  const span = tracer.startSpan("generatedWork");
+  yield* span.run(async function* () {
+    console.log("doing some work...");
+    yield 1;
+    yield 2;
+    yield 3;
+  });
+}
+
+async function doWork() {
+  const parent = tracer.startSpan("doWork");
+  return parent.run(async () => {
+    // do some work that 'parent' tracks
+    console.log("doing some work...");
+    await doAnotherWork();
+    // Create a nested span to track nested work
+    const child = tracer.startSpan("child");
+    await child.run(async () => {
+      // do some work that 'child' tracks
+      console.log("doing some nested child work...");
+    });
+    // Call a generator function
+    for await (const work of doGeneratedWork()) {
+      console.log("did work ", work);
+    }
+  });
+}
+```
+
+</td>
+</tr>
+</tbody>
+</table>
+
+If integrated with `using`, adding tracing to existing code would involve
+significantly less refactoring, and would look much more intuitive:
 
 ```js
 async function doAnotherWork() {
@@ -236,19 +473,30 @@ async function doAnotherWork() {
   // the span is closed when it's out of scope
 }
 
+async function* doGeneratedWork() {
+  using span = tracer.startActiveSpan("generatedWork");
+  console.log("doing some work...");
+  yield 1;
+  yield 2;
+  yield 3;
+  // the span is closed when it's out of scope
+}
+
 async function doWork() {
-  using parent = tracer.startActiveSpan("parent");
+  using parent = tracer.startActiveSpan("doWork");
   // do some work that 'parent' tracks
   console.log("doing some work...");
-  await doSomeWork();
+  await doAnotherWork();
   // Create a nested span to track nested work
   {
     using child = tracer.startActiveSpan("child");
     // do some work that 'child' tracks
-    console.log("doing some nested child work...")
-    // the nested span is closed when it's out of scope
+    console.log("doing some nested child work...");
   }
-  await doAnotherWork();
+  // Call a generator function
+  for await (const work of doGeneratedWork()) {
+    console.log("did work ", work);
+  }
   // This parent span is also closed when it goes out of scope
 }
 ```
@@ -256,9 +504,10 @@ async function doWork() {
 > This example is adapted from the OpenTelemetry Python example.
 > https://opentelemetry.io/docs/languages/python/instrumentation/#creating-spans
 
-Each `tracer.startActiveSpan` invocation retrieves the parent span from its
-own `AsyncContext.Variable` instance and create span as a child, and set the
-child span as the current value of the `AsyncContext.Variable` instance:
+With proposal A, an implementation of `tracer.startActiveSpan` could look like
+below. It retrieves the parent span from its own `AsyncContext.Variable`
+instance and create span as a child, and set the child span as the current value
+of the `AsyncContext.Variable` instance:
 
 ```js
 class Tracer {
@@ -305,3 +554,5 @@ span of the `"parent"` instead of `"child"`, shown as graph below:
 [`@@enter`]: https://github.com/tc39/proposal-using-enforcement?tab=readme-ov-file#proposed-solution
 [`ContinuationVariable`]: ./CONTINUATION.md
 [AsyncContext]: https://github.com/tc39/proposal-async-context
+[issue-2]: https://github.com/legendecas/proposal-async-context-disposable/issues/2
+[issue-3]: https://github.com/legendecas/proposal-async-context-disposable/issues/3
