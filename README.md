@@ -134,8 +134,8 @@ function* gen() {
 
 `.run(val, fn)` creates a new function body. The new function environment is not
 equivalent to the outer environment and can not trivially share code fragments
-between them. Additionally, `break`/`continue`/`return` can not be refactored
-naively.
+between them. Additionally, `super`/`break`/`continue`/`return` can not be
+refactored naively.
 
 It would be more intuitive to be able to insert a single line of code to scope
 the `computeResult` and `computeResult2` calls with a new AsyncContext value
