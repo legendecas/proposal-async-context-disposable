@@ -134,8 +134,8 @@ function* gen() {
 
 `.run(val, fn)` creates a new function body. The new function environment is not
 equivalent to the outer environment and can not trivially share code fragments
-between them. Additionally, `break`/`continue`/`return` can not be
-refactored naively.
+between them. Additionally, `break`/`continue`/`return` can not be refactored
+naively.
 
 It would be more intuitive to be able to insert a single line of code to scope
 the `computeResult` and `computeResult2` calls with a new AsyncContext value
@@ -278,19 +278,58 @@ not used with `DisposableStack` would have to be added, because
 
 As a mitigation to the above issue of manually entering and exiting a scope out
 of sync with the lexical scoping, an alternative proposal is to specialize the
-handling of async context variables in `using` declarations as follows:
+handling of async context variables in `using` declarations as illustrated by
+this pseudo code:
 
-- In the `using` machinery, before calling the `@@enter` method, a global flag
-  would be set that indicates that the `@@enter` method is being called from a
-  `using` declaration.
-- The `@@enter` method implementation would check if the global flag is set. If
-  it is not, an error would be thrown. If it is set, the `@@enter` method would
-  capture the async context snapshot and set it into a global variable that is
-  later read from the `using` machinery. The `@@enter` method would then create
-  a new async context scope with the new value, and enter it.
-- In the `using` machinery, after the `@@enter` method returns, the global flag
-  would be cleared, and the value of the value of the global snapshot variable
-  would be captured.
+```js
+const GLOBAL_STACK = [];
+
+function UsingEnter(state, enterMethod) {
+  const current = CaptureSnapshot();
+  GLOBAL_STACK.push(current);
+  try {
+    enterMethod();
+  } finally {
+    const newSnapshot = GLOBAL_STACK.pop();
+    RestoreSnapshot(newSnapshot);
+    state.snapshot = current;
+  }
+}
+
+function UsingExit(state, disposeMethod) {
+  try {
+    disposeMethod();
+  } finally {
+    RestoreSnapshot(state.snapshot);
+  }
+}
+
+function AsyncVariableSymbolEnter(variable, value) {
+  const current = GLOBAL_STACK.pop();
+  if (current === undefined) {
+    throw new TypeError(
+      "Can not enter an async variable outside of `using`.",
+    );
+  }
+  const newSnapshot = AddToSnapshot(
+    current,
+    variable,
+    value,
+  );
+  GLOBAL_STACK.push(newSnapshot);
+}
+```
+
+- In the `using` machinery, before calling the `@@enter` method, capture the
+  current snapshot and push it into a global stack variable.
+- The `@@enter` method implementation would check if the global stack contains a
+  snapshot. If it does not, an error would be thrown. If it does, the `@@enter`
+  method would create a new snapshot from the top most snapshot in the stack by
+  adding the variable, and then set it back into the same slot in the stack.
+  This is later read from the `using` machinery.
+- In the `using` machinery, after the `@@enter` method returns, the snapshot is
+  removed from the global stack and entered. The original captured current
+  snapshot is saved.
 
 - In the `using` machinery, once the `using` declaration lexical scope closes,
   as usual the `@@dispose` method is called. Once the `@@dispose` method
@@ -302,6 +341,11 @@ scope, and it requires the `@@enter` method to be called from a `using`
 declaration. Binding to a lexical scope is enforced, just like with `run`.
 
 The proposal does add some additional complexity to the `using` machinery.
+
+> With this proposal, `Symbol.enter` on the `AsyncContext.Variable#withValue`
+> object would never directly enter a scope, but would instead schedule the
+> enter for when the `Symbol.enter` callback is invoked. This is necessary to
+> ensure that the scope with the entered value can not leak out.
 
 ## Proposal C: enforced disposal through a specialized class
 
