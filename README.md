@@ -161,6 +161,18 @@ We are also looking to enable non-`Variable` objects that internally contain
 binding for their internal `AsyncContext.Variable` instances, without exposing
 the `AsyncContext.Variable` instance to the user.
 
+We are not necessarily looking to create a general purpose `enter`/`exit` API
+for async context that could arbitrarily interleave variable scopes. We have
+heard from implementers that doing so would be very challenging to implement
+performantly (see [#3][issue-3]). After a review of many current ecosystem uses
+of `AsyncLocalStorage` in Node, we are relatively confident that the majority of
+use cases that have used `als.enterWith()` in Node can either switch to a
+`using` based API as proposed here, or the `AsyncContext.Variable#run()` API.
+
+> If you think you have use-cases that require an "unsafe" general purpose
+> `enter`/`exit` API, please file an issue to discuss. We are interested to
+> learn about them and see how we can accommodate these use-cases.
+
 # Proposals
 
 We have not settled on any solution, but are currently exploring the following
@@ -299,7 +311,6 @@ specialize the handling of async context variables in `using` declarations as
 follows:
 
 // TODO: snek
-
 
 # Use cases
 
@@ -494,7 +505,6 @@ span of the `"parent"` instead of `"child"`, shown as graph below:
   |---| 'doAnotherWork' |
   |   ⌎-----------------⌏
 ```
-
 
 [`@@dispose`]: https://github.com/tc39/proposal-explicit-resource-management?tab=readme-ov-file#using-declarations
 [`@@enter`]: https://github.com/tc39/proposal-using-enforcement?tab=readme-ov-file#proposed-solution
