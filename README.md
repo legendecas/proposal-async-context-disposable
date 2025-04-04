@@ -222,10 +222,6 @@ This is an extension to the proposed `run` semantics.
 
 ## Use cases
 
-### Web frameworks
-
-> TODO: Let's refer to web frameworks for examples.
-
 ### Tracing
 
 The set semantic allows instrumenting existing codes without nesting them in a
