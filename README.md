@@ -279,45 +279,46 @@ not used with `DisposableStack` would have to be added, because
 As a mitigation to the above issue of manually entering and exiting a scope out
 of sync with the lexical scoping, an alternative proposal is to specialize the
 handling of async context variables in `using` declarations as illustrated by
-this pseudo code:
+this diff on pseudo code that represents a simplified transpile output of
+`using`:
 
-```js
-const GLOBAL_STACK = [];
+```diff
+ const v = new AsyncContext.Variable();
+ 
+ {
+   const _ = v.withValue("some value");
+   const __enter__ = span[Symbol.enter];
+   const __dispose__ = span[Symbol.dispose];
 
-function UsingEnter(state, enterMethod) {
-  const current = CaptureSnapshot();
-  GLOBAL_STACK.push(current);
-  try {
-    enterMethod();
-  } finally {
-    const newSnapshot = GLOBAL_STACK.pop();
-    RestoreSnapshot(newSnapshot);
-    state.snapshot = current;
-  }
-}
-
-function UsingExit(state, disposeMethod) {
-  try {
-    disposeMethod();
-  } finally {
-    RestoreSnapshot(state.snapshot);
-  }
-}
-
-function AsyncVariableSymbolEnter(variable, value) {
-  const current = GLOBAL_STACK.pop();
-  if (current === undefined) {
-    throw new TypeError(
-      "Can not enter an async variable outside of `using`.",
-    );
-  }
-  const newSnapshot = AddToSnapshot(
-    current,
-    variable,
-    value,
-  );
-  GLOBAL_STACK.push(newSnapshot);
-}
++  const __start__ = AsyncContextSnapshot();
++  globalThis.SNAPSHOTS.push(__start__); 
+   __enter__.call(span);
++  AsyncContextEnter(globalThis.SNAPSHOTS.pop());
+ 
+   try {
+     console.log("do some work");
+   } finally {
+     __dispose__.call(span);
++    AsyncContextEnter(__start__);
+   }
+ }
+ 
++AsyncContext.Variable.prototype.withValue = function (value) {
++  const key = this;
++  return {
++    [Symbol.enter]() {
++      const snapshot = globalThis.SNAPSHOTS.pop();
++      if (!snapshot) {
++        throw new Error(
++          "Can not call [Symbol.enter] outside of a using declaration.",
++        );
++      }
++      const newSnapshot = AsyncContextAdd(snapshot, key, value);
++      globalThis.SNAPSHOTS.push(newSnapshot);
++    },
++    [Symbol.dispose]() {},
++  };
++};
 ```
 
 - In the `using` machinery, before calling the `@@enter` method, capture the
@@ -390,7 +391,9 @@ class SpanRef extends AsyncVariableScopable {
   }
 
   // span apis here, etc...
-  setAttribute(name, value) { this.#span.setAttribute(name, value); }
+  setAttribute(name, value) {
+    this.#span.setAttribute(name, value);
+  }
 }
 
 class Tracer {
